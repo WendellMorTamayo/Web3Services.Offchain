@@ -2,6 +2,8 @@ using Chrysalis.Cbor.Extensions.Cardano.Core.Common;
 using Chrysalis.Cbor.Extensions.Cardano.Core.Transaction;
 using Chrysalis.Cbor.Types.Cardano.Core.Common;
 using Chrysalis.Cbor.Types.Cardano.Core.Transaction;
+using Chrysalis.Wallet.Models.Addresses;
+using Chrysalis.Wallet.Models.Enums;
 using WalletAddress = Chrysalis.Wallet.Models.Addresses.Address;
 
 namespace Web3Services.Data.Utils;
@@ -86,5 +88,22 @@ public static class ReducerUtils
         });
 
         return subjects;
+    }
+
+    public static string ConstructBech32Address(string paymentKeyHash, string stakeKeyHash, NetworkType network = NetworkType.Mainnet)
+    {
+        try
+        {
+            byte[] paymentBytes = Convert.FromHexString(paymentKeyHash);
+            byte[]? stakeBytes = string.IsNullOrEmpty(stakeKeyHash) ? null : Convert.FromHexString(stakeKeyHash);
+
+            AddressType addressType = stakeBytes != null ? AddressType.Base : AddressType.EnterprisePayment;
+            WalletAddress address = new(network, addressType, paymentBytes, stakeBytes);
+            return address.ToBech32();
+        }
+        catch
+        {
+            return string.Empty;
+        }
     }
 }

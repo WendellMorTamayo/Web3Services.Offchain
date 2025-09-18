@@ -12,8 +12,8 @@ using Web3Services.Data.Models;
 namespace Web3Services.Data.Migrations
 {
     [DbContext(typeof(Web3ServicesDbContext))]
-    [Migration("20250909154200_InitialMigration1")]
-    partial class InitialMigration1
+    [Migration("20250918124807_InitialMigration")]
+    partial class InitialMigration
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -100,6 +100,8 @@ namespace Web3Services.Data.Migrations
                     b.HasIndex("Slot");
 
                     b.HasIndex("SpentSlot");
+
+                    b.HasIndex("SpentTxHash");
 
                     b.HasIndex("StakeKeyHash");
 

@@ -30,3 +30,14 @@ public record ActivityDetails(
     string? PoolId,
     int? TypeId = null
 );
+
+public record SubjectActivityDetails(
+    TransactionType Type,
+    ulong Amount,
+    string? Address
+);
+
+public record SubjectTransactionActivityGroup(
+    TransactionType Type,
+    IEnumerable<SubjectActivityDetails> Details
+);

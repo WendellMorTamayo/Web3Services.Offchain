@@ -19,8 +19,10 @@ public class TrackAddressesEndpoint(
 {
     public override void Configure()
     {
-        Post("/track_address");
+        Post("/addresses/track");
         AllowAnonymous();
+
+        Options(x => x.WithTags("Addresses"));
     }
 
     public override async Task HandleAsync(TrackAddressesRequest req, CancellationToken ct)

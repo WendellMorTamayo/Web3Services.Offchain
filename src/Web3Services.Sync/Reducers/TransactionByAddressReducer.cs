@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using System.Runtime.CompilerServices;
 using Argus.Sync.Reducers;
 using Argus.Sync.Utils;
 using Chrysalis.Cbor.Extensions.Cardano.Core;
@@ -14,6 +15,7 @@ using Web3Services.Data.Utils;
 
 namespace Web3Services.Sync.Reducers;
 
+[DependsOn(typeof(OutputBySlotReducer))]
 public class TransactionByAddressReducer(
     IDbContextFactory<Web3ServicesDbContext> dbContextFactory
 ) : IReducer<TransactionByAddress>
@@ -86,7 +88,7 @@ public class TransactionByAddressReducer(
             {
                 string inputTxHash = Convert.ToHexStringLower(x.input.TransactionId);
                 TransactionBody? referencedTx = referencedTxs.FirstOrDefault(tx => tx.Hash() == inputTxHash);
-                
+
                 if (referencedTx == null) return [];
 
                 TransactionOutput spentOutput = referencedTx.Outputs().ElementAt((int)x.input.Index);
@@ -133,6 +135,8 @@ public class TransactionByAddressReducer(
         Web3ServicesDbContext dbContext
     )
     {
+        HashSet<(string PaymentKeyHash, string StakeKeyHash, string Hash)> addedEntries = [];
+
         transactions.ToList().ForEach(tx =>
         {
             IEnumerable<(string PaymentKeyHash, string StakeKeyHash)> trackedOutputs =
@@ -144,33 +148,28 @@ public class TransactionByAddressReducer(
             if (!trackedOutputs.Any() && !trackedInputs.Any()) return;
 
             IEnumerable<string> subjects = [.. tx.Outputs().SelectMany(ReducerUtils.ExtractSubjectsFromOutput)];
+            string txHash = tx.Hash();
 
-            trackedOutputs.ToList().ForEach(address =>
+            HashSet<(string PaymentKeyHash, string StakeKeyHash)> uniqueAddresses = [..trackedOutputs, ..trackedInputs];
+
+            uniqueAddresses.ToList().ForEach(address =>
             {
-                TransactionByAddress entry = new(
-                    StakeKeyHash: address.StakeKeyHash,
-                    PaymentKeyHash: address.PaymentKeyHash,
-                    Subjects: subjects,
-                    Hash: tx.Hash(),
-                    Slot: slot,
-                    Raw: tx.Raw.HasValue ? tx.Raw.Value.ToArray() : CborSerializer.Serialize(tx)
-                );
+                (string PaymentKeyHash, string StakeKeyHash, string txHash) key = (address.PaymentKeyHash, address.StakeKeyHash, txHash);
 
-                dbContext.TransactionsByAddress.Add(entry);
-            });
+                if (!addedEntries.Contains(key))
+                {
+                    TransactionByAddress entry = new(
+                        StakeKeyHash: address.StakeKeyHash,
+                        PaymentKeyHash: address.PaymentKeyHash,
+                        Subjects: subjects,
+                        Hash: txHash,
+                        Slot: slot,
+                        Raw: tx.Raw.HasValue ? tx.Raw.Value.ToArray() : CborSerializer.Serialize(tx)
+                    );
 
-            trackedInputs.ToList().ForEach(address =>
-            {
-                TransactionByAddress entry = new(
-                    StakeKeyHash: address.StakeKeyHash,
-                    PaymentKeyHash: address.PaymentKeyHash,
-                    Subjects: subjects,
-                    Hash: tx.Hash(),
-                    Slot: slot,
-                    Raw: tx.Raw.HasValue ? tx.Raw.Value.ToArray() : CborSerializer.Serialize(tx)
-                );
-
-                dbContext.TransactionsByAddress.Add(entry);
+                    dbContext.TransactionsByAddress.Add(entry);
+                    addedEntries.Add(key);
+                }
             });
         });
     }
