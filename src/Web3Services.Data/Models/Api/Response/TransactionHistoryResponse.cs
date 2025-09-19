@@ -3,17 +3,15 @@ using Web3Services.Data.Models.Enums;
 namespace Web3Services.Data.Models.Api.Response;
 
 public record TransactionActivityGroup(
-    TransactionType Type,
     IEnumerable<ActivityDetails> Details
 );
 
 public record TransactionHistoryItem(
     string Hash,
-    IEnumerable<TransactionActivityGroup> Activities,
+    IEnumerable<ActivityDetails> Activities,
     ulong Slot,
     string Timestamp,
-    IEnumerable<string> Subjects,
-    byte[] Raw
+    string Raw
 );
 
 public record TransactionHistoryResponse(
@@ -38,6 +36,5 @@ public record SubjectActivityDetails(
 );
 
 public record SubjectTransactionActivityGroup(
-    TransactionType Type,
     IEnumerable<SubjectActivityDetails> Details
 );

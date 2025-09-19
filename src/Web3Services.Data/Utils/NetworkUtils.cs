@@ -7,7 +7,7 @@ public static class NetworkUtils
 {
     public static NetworkType GetNetworkType(IConfiguration configuration)
     {
-        return configuration.GetValue<int>("CardanoNodeConnection:NetworkMagic") switch
+        return configuration.GetValue<int>("NetworkMagic") switch
         {
             764824073 => NetworkType.Mainnet,
             1 => NetworkType.Preprod,

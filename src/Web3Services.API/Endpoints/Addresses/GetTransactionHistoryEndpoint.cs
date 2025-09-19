@@ -4,8 +4,8 @@ using Chrysalis.Cbor.Extensions.Cardano.Core.Governance;
 using Chrysalis.Cbor.Extensions.Cardano.Core.Transaction;
 using Chrysalis.Cbor.Serialization;
 using Chrysalis.Cbor.Types.Cardano.Core.Transaction;
-using Chrysalis.Tx.Utils;
 using Chrysalis.Wallet.Models.Addresses;
+using Chrysalis.Wallet.Models.Enums;
 using FastEndpoints;
 using Microsoft.EntityFrameworkCore;
 using Web3Services.Data.Extensions;
@@ -35,9 +35,12 @@ public class GetTransactionHistoryBinder : IRequestBinder<GetTransactionHistoryR
 
 // TODO: Test staking/governance activities
 public class GetTransactionHistoryEndpoint(
-    IDbContextFactory<Web3ServicesDbContext> dbContextFactory
+    IDbContextFactory<Web3ServicesDbContext> dbContextFactory,
+    IConfiguration configuration
 ) : Endpoint<GetTransactionHistoryRequest, PaginatedResponse<TransactionHistoryItem>>
 {
+    private readonly NetworkType _networkType = NetworkUtils.GetNetworkType(configuration);
+
     public override void Configure()
     {
         Get("/transactions/addresses/{paymentKeyHash}/history");
@@ -118,9 +121,8 @@ public class GetTransactionHistoryEndpoint(
                 Hash: tx.Hash,
                 Activities: ClassifyTransactionActivities(tx, req.PaymentKeyHash, req.StakeKeyHash, inputUtxoLookup),
                 Slot: tx.Slot,
-                Timestamp: SlotToTimestamp((long)tx.Slot),
-                Subjects: tx.Subjects,
-                Raw: tx.Raw
+                Timestamp: ReducerUtils.SlotToTimestamp((long)tx.Slot, _networkType),
+                Raw: Convert.ToHexStringLower(tx.Raw)
             ));
 
         Pagination pagination = BuildPagination(transactions, req.Cursor, req.Direction, actualHasMore);
@@ -129,35 +131,31 @@ public class GetTransactionHistoryEndpoint(
         await Send.OkAsync(response, ct);
     }
 
-    private static IEnumerable<TransactionActivityGroup> ClassifyTransactionActivities(
+    private IEnumerable<ActivityDetails> ClassifyTransactionActivities(
         TransactionByAddress tx,
         string paymentKeyHash,
         string? stakeKeyHash,
         Dictionary<string, List<OutputBySlot>> inputUtxoLookup)
     {
-        List<TransactionActivityGroup> activities = [];
+        List<ActivityDetails> activities = [];
 
         try
         {
             TransactionBody txBody = CborSerializer.Deserialize<TransactionBody>(tx.Raw);
 
-            IEnumerable<TransactionActivityGroup> stakeActivities = AnalyzeStakingActivities(txBody, stakeKeyHash);
-            activities.AddRange(stakeActivities);
+            // Calculate net transfers (inputs vs outputs) for accurate classification
+            activities.AddRange(AnalyzeNetTransfers(txBody, paymentKeyHash, stakeKeyHash, tx, inputUtxoLookup, _networkType));
 
-            IEnumerable<TransactionActivityGroup> withdrawalActivities = AnalyzeWithdrawalActivities(txBody, stakeKeyHash);
-            activities.AddRange(withdrawalActivities);
-
-            IEnumerable<TransactionActivityGroup> votingActivities = AnalyzeVotingActivities(txBody, paymentKeyHash);
-            activities.AddRange(votingActivities);
-
-            IEnumerable<TransactionActivityGroup> transferActivities = AnalyzeTransferActivities(txBody, paymentKeyHash, stakeKeyHash, tx, inputUtxoLookup);
-            activities.AddRange(transferActivities);
+            // Add other activity types
+            activities.AddRange(AnalyzeStakingActivities(txBody, stakeKeyHash).SelectMany(g => g.Details));
+            activities.AddRange(AnalyzeWithdrawalActivities(txBody, stakeKeyHash).SelectMany(g => g.Details));
+            activities.AddRange(AnalyzeVotingActivities(txBody, paymentKeyHash).SelectMany(g => g.Details));
 
             return activities.AsEnumerable();
         }
         catch
         {
-            return [new TransactionActivityGroup(TransactionType.Other, [new ActivityDetails(TransactionType.Other, 0, null, null, null, null)])];
+            return [new ActivityDetails(TransactionType.Other, 0, null, null, null, null)];
         }
     }
 
@@ -171,7 +169,7 @@ public class GetTransactionHistoryEndpoint(
         List<ActivityDetails> stakeDetails = [];
 
         // Add stake-related certificates
-        List<ActivityDetails> stakeCerts = txBody.Certificates()?
+        IEnumerable<ActivityDetails> stakeCerts = txBody.Certificates()?
             .Where(cert => cert.IsStakeRelated())
             .Select(cert => new ActivityDetails(
                 Type: TransactionType.Stake,
@@ -180,14 +178,13 @@ public class GetTransactionHistoryEndpoint(
                 Address: null,
                 PoolId: cert.GetPoolId(),
                 TypeId: (int)cert.GetCertificateType()
-            ))
-            .ToList() ?? [];
+            )) ?? [];
 
         stakeDetails.AddRange(stakeCerts);
 
         if (stakeDetails.Any())
         {
-            return [new TransactionActivityGroup(TransactionType.Stake, stakeDetails)];
+            return [new TransactionActivityGroup(stakeDetails)];
         }
 
         return [];
@@ -224,7 +221,7 @@ public class GetTransactionHistoryEndpoint(
 
         if (withdrawalDetails.Any())
         {
-            return [new TransactionActivityGroup(TransactionType.Withdraw, withdrawalDetails)];
+            return [new TransactionActivityGroup(withdrawalDetails)];
         }
 
         return [];
@@ -274,7 +271,7 @@ public class GetTransactionHistoryEndpoint(
 
         if (votingDetails.Any())
         {
-            return [new TransactionActivityGroup(TransactionType.Vote, votingDetails)];
+            return [new TransactionActivityGroup(votingDetails)];
         }
 
         return [];
@@ -293,21 +290,21 @@ public class GetTransactionHistoryEndpoint(
         {
             IEnumerable<ActivityDetails> receivedDetails = ExtractReceivedTransfers(txBody, paymentKeyHash, stakeKeyHash);
             IEnumerable<ActivityDetails> sentDetails = ExtractSentTransfers(tx, paymentKeyHash, stakeKeyHash, inputUtxoLookup);
-            IEnumerable<ActivityDetails> selfDetails = ExtractSelfTransfers(txBody, paymentKeyHash, stakeKeyHash);
+            IEnumerable<ActivityDetails> selfDetails = ExtractSelfTransfers(txBody, paymentKeyHash, stakeKeyHash, tx, inputUtxoLookup);
 
             if (receivedDetails.Any())
             {
-                activities.Add(new TransactionActivityGroup(TransactionType.Received, receivedDetails));
+                activities.Add(new TransactionActivityGroup(receivedDetails));
             }
 
             if (sentDetails.Any())
             {
-                activities.Add(new TransactionActivityGroup(TransactionType.Sent, sentDetails));
+                activities.Add(new TransactionActivityGroup(sentDetails));
             }
 
             if (selfDetails.Any())
             {
-                activities.Add(new TransactionActivityGroup(TransactionType.Self, selfDetails));
+                activities.Add(new TransactionActivityGroup(selfDetails));
             }
         }
         catch
@@ -316,12 +313,6 @@ public class GetTransactionHistoryEndpoint(
         }
 
         return activities.AsEnumerable();
-    }
-
-    private static string SlotToTimestamp(long slot)
-    {
-        DateTime utcTime = SlotUtil.GetUTCTimeFromSlot(SlotUtil.Mainnet, slot);
-        return utcTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
     }
 
     private static List<ActivityDetails> ExtractReceivedTransfers(
@@ -401,7 +392,9 @@ public class GetTransactionHistoryEndpoint(
     private static List<ActivityDetails> ExtractSelfTransfers(
         TransactionBody txBody,
         string paymentKeyHash,
-        string? stakeKeyHash)
+        string? stakeKeyHash,
+        TransactionByAddress tx,
+        Dictionary<string, List<OutputBySlot>> inputUtxoLookup)
     {
         List<ActivityDetails> selfDetails = [];
 
@@ -412,8 +405,9 @@ public class GetTransactionHistoryEndpoint(
                 return outputPaymentHash == paymentKeyHash && outputStakeHash == stakeKeyHash;
             })];
 
-        // Only consider it a self-transfer if we also have inputs (indicating we're spending from the same address)
-        bool hasInputsFromSameAddress = txBody.Inputs().Any();
+        // Only consider it a self-transfer if we have inputs from the same address
+        bool hasInputsFromSameAddress = inputUtxoLookup.ContainsKey(tx.Hash) &&
+            inputUtxoLookup[tx.Hash].Any(utxo => utxo.PaymentKeyHash == paymentKeyHash && utxo.StakeKeyHash == stakeKeyHash);
 
         if (hasInputsFromSameAddress)
         {
@@ -456,6 +450,84 @@ public class GetTransactionHistoryEndpoint(
         }
 
         return selfDetails;
+    }
+
+    private static IEnumerable<ActivityDetails> AnalyzeNetTransfers(
+        TransactionBody txBody,
+        string paymentKeyHash,
+        string? stakeKeyHash,
+        TransactionByAddress tx,
+        Dictionary<string, List<OutputBySlot>> inputUtxoLookup,
+        NetworkType networkType = NetworkType.Mainnet)
+    {
+        List<ActivityDetails> activities = [];
+
+        // Calculate total inputs from this address
+        ulong totalInputs = 0;
+        if (inputUtxoLookup.ContainsKey(tx.Hash))
+        {
+            totalInputs = (ulong)inputUtxoLookup[tx.Hash]
+                .Where(utxo => utxo.PaymentKeyHash == paymentKeyHash && utxo.StakeKeyHash == stakeKeyHash)
+                .Select(utxo => TransactionOutput.Read(utxo.Raw))
+                .Sum(output => (long)output.Amount().Lovelace());
+        }
+
+        // Calculate total outputs to this address
+        ulong totalOutputsToSelf = (ulong)txBody.Outputs()
+            .Where(output => ReducerUtils.TryGetBech32AddressParts(output, out string outPayment, out string? outStake) &&
+                            outPayment == paymentKeyHash && outStake == stakeKeyHash)
+            .Sum(output => (long)output.Amount().Lovelace());
+
+        // Calculate total outputs to other addresses
+        ulong totalOutputsToOthers = (ulong)txBody.Outputs()
+            .Where(output => ReducerUtils.TryGetBech32AddressParts(output, out string outPayment, out string? outStake) &&
+                            !(outPayment == paymentKeyHash && outStake == stakeKeyHash))
+            .Sum(output => (long)output.Amount().Lovelace());
+
+        // Classify based on net effect
+        if (totalInputs > 0)
+        {
+            // This is a spending transaction
+            if (totalOutputsToOthers > 0)
+            {
+                // Sent money to other addresses
+                activities.Add(new ActivityDetails(
+                    Type: TransactionType.Sent,
+                    Amount: totalOutputsToOthers,
+                    Subject: string.Empty,
+                    Address: ReducerUtils.ConstructBech32Address(paymentKeyHash, stakeKeyHash ?? string.Empty, networkType),
+                    PoolId: null,
+                    TypeId: null
+                ));
+            }
+
+            if (totalOutputsToSelf > 0)
+            {
+                // Change returned to self
+                activities.Add(new ActivityDetails(
+                    Type: TransactionType.Self,
+                    Amount: totalOutputsToSelf,
+                    Subject: string.Empty,
+                    Address: ReducerUtils.ConstructBech32Address(paymentKeyHash, stakeKeyHash ?? string.Empty, networkType),
+                    PoolId: null,
+                    TypeId: null
+                ));
+            }
+        }
+        else if (totalOutputsToSelf > 0)
+        {
+            // Pure receive transaction
+            activities.Add(new ActivityDetails(
+                Type: TransactionType.Received,
+                Amount: totalOutputsToSelf,
+                Subject: string.Empty,
+                Address: ReducerUtils.ConstructBech32Address(paymentKeyHash, stakeKeyHash ?? string.Empty, networkType),
+                PoolId: null,
+                TypeId: null
+            ));
+        }
+
+        return activities.AsEnumerable();
     }
 
     private static IQueryable<TransactionByAddress> BuildBaseQuery(
@@ -536,7 +608,7 @@ static class TransactionHistoryQueryExtensions
             {
                 return query.OrderByDescending(tx => tx.Slot).ThenByDescending(tx => tx.Hash);
             }
-            
+
             string cursorHash = parts[1];
 
             return direction switch

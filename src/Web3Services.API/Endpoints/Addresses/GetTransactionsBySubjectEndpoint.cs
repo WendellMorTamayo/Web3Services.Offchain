@@ -114,7 +114,7 @@ public class GetTransactionsBySubjectEndpoint(
             Hash: tx.Hash,
             Address: ReducerUtils.ConstructBech32Address(tx.PaymentKeyHash, tx.StakeKeyHash, _networkType),
             Slot: tx.Slot,
-            Timestamp: SlotToTimestamp((long)tx.Slot, _networkType),
+            Timestamp: ReducerUtils.SlotToTimestamp((long)tx.Slot, _networkType),
             Activities: ClassifyTransactionActivities(tx, tx.PaymentKeyHash, tx.StakeKeyHash, req.Subject, inputUtxoLookup)
         ));
 
@@ -141,34 +141,20 @@ public class GetTransactionsBySubjectEndpoint(
 
             if (receivedDetails.Any())
             {
-                activities.Add(new SubjectTransactionActivityGroup(TransactionType.Received, receivedDetails));
+                activities.Add(new SubjectTransactionActivityGroup(receivedDetails));
             }
 
             if (sentDetails.Any())
             {
-                activities.Add(new SubjectTransactionActivityGroup(TransactionType.Sent, sentDetails));
+                activities.Add(new SubjectTransactionActivityGroup(sentDetails));
             }
 
-            return activities.Count > 0 ? activities.AsEnumerable() : [new SubjectTransactionActivityGroup(TransactionType.Other, [new SubjectActivityDetails(TransactionType.Other, 0, null)])];
+            return activities.Count > 0 ? activities.AsEnumerable() : [new SubjectTransactionActivityGroup([new SubjectActivityDetails(TransactionType.Other, 0, null)])];
         }
         catch
         {
-            return [new SubjectTransactionActivityGroup(TransactionType.Other, [new SubjectActivityDetails(TransactionType.Other, 0, null)])];
+            return [new SubjectTransactionActivityGroup([new SubjectActivityDetails(TransactionType.Other, 0, null)])];
         }
-    }
-
-    private static string SlotToTimestamp(long slot, NetworkType network = NetworkType.Mainnet)
-    {
-        SlotNetworkConfig networkConfig = network switch
-        {
-            NetworkType.Mainnet => SlotUtil.Mainnet,
-            NetworkType.Preprod => SlotUtil.Preprod,
-            NetworkType.Preview => SlotUtil.Preview,
-            _ => SlotUtil.Mainnet
-        };
-
-        DateTime utcTime = SlotUtil.GetUTCTimeFromSlot(networkConfig, slot);
-        return utcTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
     }
 
     private static IEnumerable<SubjectActivityDetails> ExtractReceivedActivities(

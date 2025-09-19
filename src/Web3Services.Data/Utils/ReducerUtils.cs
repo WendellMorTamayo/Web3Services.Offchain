@@ -2,6 +2,8 @@ using Chrysalis.Cbor.Extensions.Cardano.Core.Common;
 using Chrysalis.Cbor.Extensions.Cardano.Core.Transaction;
 using Chrysalis.Cbor.Types.Cardano.Core.Common;
 using Chrysalis.Cbor.Types.Cardano.Core.Transaction;
+using Chrysalis.Tx.Models;
+using Chrysalis.Tx.Utils;
 using Chrysalis.Wallet.Models.Addresses;
 using Chrysalis.Wallet.Models.Enums;
 using WalletAddress = Chrysalis.Wallet.Models.Addresses.Address;
@@ -90,7 +92,7 @@ public static class ReducerUtils
         return subjects;
     }
 
-    public static string ConstructBech32Address(string paymentKeyHash, string stakeKeyHash, NetworkType network = NetworkType.Mainnet)
+    public static string ConstructBech32Address(string paymentKeyHash, string stakeKeyHash, NetworkType network)
     {
         try
         {
@@ -105,5 +107,19 @@ public static class ReducerUtils
         {
             return string.Empty;
         }
+    }
+
+    public static string SlotToTimestamp(long slot, NetworkType network)
+    {
+        SlotNetworkConfig networkConfig = network switch
+        {
+            NetworkType.Mainnet => SlotUtil.Mainnet,
+            NetworkType.Preprod => SlotUtil.Preprod,
+            NetworkType.Preview => SlotUtil.Preview,
+            _ => SlotUtil.Mainnet
+        };
+
+        DateTime utcTime = SlotUtil.GetUTCTimeFromSlot(networkConfig, slot);
+        return utcTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
     }
 }

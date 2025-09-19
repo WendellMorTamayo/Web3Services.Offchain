@@ -142,12 +142,7 @@ public class OutputBySlotReducer(
                 return resolvedInputsByTx.Select(ribtx => (tx.Hash(), ribtx));
             });
 
-        IEnumerable<(string spentTxHash, OutputBySlot resolvedInput)> trackedResolvedInputs = resolvedInputsByTx
-            .Where(item => trackedAddresses.Any(ta =>
-                ta.PaymentKeyHash == item.resolvedInput.PaymentKeyHash &&
-                ta.StakeKeyHash == item.resolvedInput.StakeKeyHash));
-
-        trackedResolvedInputs.ToList().ForEach(resolvedInputByTx =>
+        resolvedInputsByTx.ToList().ForEach(resolvedInputByTx =>
         {
             OutputBySlot? existingOutput = dbContext.OutputsBySlot.Local
                 .FirstOrDefault(e => e.OutRef == resolvedInputByTx.resolvedInput.OutRef);
