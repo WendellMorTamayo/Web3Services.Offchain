@@ -1,8 +1,6 @@
 using Chrysalis.Cbor.Extensions.Cardano.Core.Common;
 using Chrysalis.Cbor.Extensions.Cardano.Core.Transaction;
 using Chrysalis.Cbor.Types.Cardano.Core.Transaction;
-using Chrysalis.Tx.Models;
-using Chrysalis.Tx.Utils;
 using Chrysalis.Wallet.Models.Enums;
 using FastEndpoints;
 using Microsoft.EntityFrameworkCore;
@@ -13,21 +11,7 @@ using Web3Services.Data.Models.Entity;
 using Web3Services.Data.Models.Enums;
 using Web3Services.Data.Utils;
 
-namespace Web3Services.API.Endpoints.Addresses;
-
-public class GetTransactionsBySubjectBinder : IRequestBinder<GetTransactionsBySubjectRequest>
-{
-    public ValueTask<GetTransactionsBySubjectRequest> BindAsync(BinderContext ctx, CancellationToken ct)
-    {
-        return ValueTask.FromResult(new GetTransactionsBySubjectRequest
-        {
-            Subject = ctx.HttpContext.Request.RouteValues["subject"]?.ToString()!,
-            Cursor = ctx.HttpContext.Request.Query["cursor"].FirstOrDefault(),
-            Limit = int.TryParse(ctx.HttpContext.Request.Query["limit"].FirstOrDefault(), out int limit) ? limit : 50,
-            Direction = Enum.TryParse<PaginationDirection>(ctx.HttpContext.Request.Query["direction"].FirstOrDefault(), out var dir) ? dir : PaginationDirection.Next
-        });
-    }
-}
+namespace Web3Services.API.Endpoints;
 
 public class GetTransactionsBySubjectEndpoint(
     IDbContextFactory<Web3ServicesDbContext> dbContextFactory,
@@ -207,7 +191,7 @@ public class GetTransactionsBySubjectEndpoint(
             .AsNoTracking()
             .Where(tx => tx.Subjects.Contains(subject));
 
-        return baseQuery.ApplyTransactionsBySubjectCursorPagination(cursor, direction);
+        return ApplyTransactionsBySubjectCursorPagination(baseQuery, cursor, direction);
     }
 
     private static Pagination BuildPagination(List<TransactionByAddress> transactions, string? cursor, PaginationDirection direction, bool actualHasMore)
@@ -246,12 +230,9 @@ public class GetTransactionsBySubjectEndpoint(
 
         return pagination;
     }
-}
 
-static class TransactionsBySubjectQueryExtensions
-{
     public static IQueryable<TransactionByAddress> ApplyTransactionsBySubjectCursorPagination(
-        this IQueryable<TransactionByAddress> query,
+        IQueryable<TransactionByAddress> query,
         string? cursor,
         PaginationDirection direction)
     {
@@ -269,7 +250,7 @@ static class TransactionsBySubjectQueryExtensions
             {
                 return query.OrderByDescending(tx => tx.Slot).ThenByDescending(tx => tx.Hash);
             }
-            
+
             string cursorHash = parts[1];
 
             return direction switch
@@ -292,5 +273,19 @@ static class TransactionsBySubjectQueryExtensions
                 .OrderByDescending(tx => tx.Slot)
                 .ThenByDescending(tx => tx.Hash);
         }
+    }
+}
+
+class GetTransactionsBySubjectBinder : IRequestBinder<GetTransactionsBySubjectRequest>
+{
+    public ValueTask<GetTransactionsBySubjectRequest> BindAsync(BinderContext ctx, CancellationToken ct)
+    {
+        return ValueTask.FromResult(new GetTransactionsBySubjectRequest
+        {
+            Subject = ctx.HttpContext.Request.RouteValues["subject"]?.ToString()!,
+            Cursor = ctx.HttpContext.Request.Query["cursor"].FirstOrDefault(),
+            Limit = int.TryParse(ctx.HttpContext.Request.Query["limit"].FirstOrDefault(), out int limit) ? limit : 50,
+            Direction = Enum.TryParse<PaginationDirection>(ctx.HttpContext.Request.Query["direction"].FirstOrDefault(), out var dir) ? dir : PaginationDirection.Next
+        });
     }
 }

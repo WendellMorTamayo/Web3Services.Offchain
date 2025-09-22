@@ -16,22 +16,7 @@ using Web3Services.Data.Models.Entity;
 using Web3Services.Data.Models.Enums;
 using Web3Services.Data.Utils;
 
-namespace Web3Services.API.Endpoints.Addresses;
-
-public class GetTransactionHistoryBinder : IRequestBinder<GetTransactionHistoryRequest>
-{
-    public ValueTask<GetTransactionHistoryRequest> BindAsync(BinderContext ctx, CancellationToken ct)
-    {
-        return ValueTask.FromResult(new GetTransactionHistoryRequest
-        {
-            PaymentKeyHash = ctx.HttpContext.Request.RouteValues["paymentKeyHash"]?.ToString()!,
-            StakeKeyHash = ctx.HttpContext.Request.Query["stakeKeyHash"].FirstOrDefault(),
-            Cursor = ctx.HttpContext.Request.Query["cursor"].FirstOrDefault(),
-            Limit = int.TryParse(ctx.HttpContext.Request.Query["limit"].FirstOrDefault(), out int limit) ? limit : 50,
-            Direction = Enum.TryParse<PaginationDirection>(ctx.HttpContext.Request.Query["direction"].FirstOrDefault(), out var dir) ? dir : PaginationDirection.Next
-        });
-    }
-}
+namespace Web3Services.API.Endpoints;
 
 // TODO: Test staking/governance activities
 public class GetTransactionHistoryEndpoint(
@@ -43,16 +28,15 @@ public class GetTransactionHistoryEndpoint(
 
     public override void Configure()
     {
-        Get("/transactions/addresses/{paymentKeyHash}/history");
+        Get("/transactions/addresses/{address}/history");
         AllowAnonymous();
         RequestBinder(new GetTransactionHistoryBinder());
 
         Summary(s =>
         {
             s.Summary = "Get transaction history for a specific address";
-            s.Description = "Fetches paginated transaction history for an address with optional stake key filtering. Supports cursor-based pagination in both directions.";
-            s.Params["paymentKeyHash"] = "Payment key hash of the address to get transaction history for";
-            s.Params["stakeKeyHash"] = "Optional stake key hash to filter transactions for a specific staking address";
+            s.Description = "Fetches paginated transaction history for a bech32 address. Supports cursor-based pagination in both directions.";
+            s.Params["address"] = "Bech32 address to get transaction history for";
             s.Params["cursor"] = "Base64 encoded cursor for pagination. Use the nextCursor or previousCursor from the previous response";
             s.Params["direction"] = "Pagination direction: 'Next' for newer transactions, 'Previous' for older transactions. Default: 'Next'";
             s.Params["limit"] = "Number of transactions to return per page. Default: 50, Maximum: 100";
@@ -82,9 +66,16 @@ public class GetTransactionHistoryEndpoint(
             return;
         }
 
+        if (!ReducerUtils.TryGetBech32AddressParts(req.Address, out string paymentKeyHash, out string? stakeKeyHash))
+        {
+            AddError("Invalid bech32 address format");
+            await Send.ErrorsAsync(StatusCodes.Status400BadRequest, ct);
+            return;
+        }
+
         await using Web3ServicesDbContext dbContext = await dbContextFactory.CreateDbContextAsync(ct);
 
-        IQueryable<TransactionByAddress> query = BuildBaseQuery(dbContext, req.PaymentKeyHash, req.StakeKeyHash, req.Cursor, req.Direction);
+        IQueryable<TransactionByAddress> query = BuildBaseQuery(dbContext, paymentKeyHash, stakeKeyHash, req.Cursor, req.Direction);
 
         List<TransactionByAddress> transactions = await query
             .Take(req.Limit + 1)
@@ -119,11 +110,12 @@ public class GetTransactionHistoryEndpoint(
         IEnumerable<TransactionHistoryItem> historyItems = transactions
             .Select(tx => new TransactionHistoryItem(
                 Hash: tx.Hash,
-                Activities: ClassifyTransactionActivities(tx, req.PaymentKeyHash, req.StakeKeyHash, inputUtxoLookup),
+                Activities: ClassifyTransactionActivities(tx, paymentKeyHash, stakeKeyHash, inputUtxoLookup),
                 Slot: tx.Slot,
                 Timestamp: ReducerUtils.SlotToTimestamp((long)tx.Slot, _networkType),
                 Raw: Convert.ToHexStringLower(tx.Raw)
-            ));
+            ))
+            .Where(item => item.Activities.Any());
 
         Pagination pagination = BuildPagination(transactions, req.Cursor, req.Direction, actualHasMore);
         PaginatedResponse<TransactionHistoryItem> response = new(historyItems, pagination);
@@ -143,8 +135,8 @@ public class GetTransactionHistoryEndpoint(
         {
             TransactionBody txBody = CborSerializer.Deserialize<TransactionBody>(tx.Raw);
 
-            // Calculate net transfers (inputs vs outputs) for accurate classification
-            activities.AddRange(AnalyzeNetTransfers(txBody, paymentKeyHash, stakeKeyHash, tx, inputUtxoLookup, _networkType));
+            // Analyze separate transfer activities
+            activities.AddRange(AnalyzeTransferActivities(txBody, paymentKeyHash, stakeKeyHash, tx, inputUtxoLookup).SelectMany(g => g.Details));
 
             // Add other activity types
             activities.AddRange(AnalyzeStakingActivities(txBody, stakeKeyHash).SelectMany(g => g.Details));
@@ -344,7 +336,7 @@ public class GetTransactionHistoryEndpoint(
             }
 
             // Add multi-asset amounts
-            if (output.Amount().MultiAsset() != null)
+            if (output.Amount().MultiAsset().Any())
             {
                 allReceivedDetails.AddRange(
                     output.Amount().MultiAsset().Keys
@@ -383,7 +375,7 @@ public class GetTransactionHistoryEndpoint(
                 Type: TransactionType.Sent,
                 Amount: x.output.Amount().Lovelace(),
                 Subject: string.Empty,
-                Address: paymentKeyHash,
+                Address: new Address(x.output.Address()).ToBech32(),
                 PoolId: null,
                 TypeId: null
             ))];
@@ -429,7 +421,7 @@ public class GetTransactionHistoryEndpoint(
                 }
 
                 // Add multi-asset amounts for self-transfers
-                if (output.Amount().MultiAsset() != null)
+                if (output.Amount().MultiAsset().Any())
                 {
                     selfDetails.AddRange(
                         output.Amount().MultiAsset().Keys
@@ -452,84 +444,6 @@ public class GetTransactionHistoryEndpoint(
         return selfDetails;
     }
 
-    private static IEnumerable<ActivityDetails> AnalyzeNetTransfers(
-        TransactionBody txBody,
-        string paymentKeyHash,
-        string? stakeKeyHash,
-        TransactionByAddress tx,
-        Dictionary<string, List<OutputBySlot>> inputUtxoLookup,
-        NetworkType networkType = NetworkType.Mainnet)
-    {
-        List<ActivityDetails> activities = [];
-
-        // Calculate total inputs from this address
-        ulong totalInputs = 0;
-        if (inputUtxoLookup.ContainsKey(tx.Hash))
-        {
-            totalInputs = (ulong)inputUtxoLookup[tx.Hash]
-                .Where(utxo => utxo.PaymentKeyHash == paymentKeyHash && utxo.StakeKeyHash == stakeKeyHash)
-                .Select(utxo => TransactionOutput.Read(utxo.Raw))
-                .Sum(output => (long)output.Amount().Lovelace());
-        }
-
-        // Calculate total outputs to this address
-        ulong totalOutputsToSelf = (ulong)txBody.Outputs()
-            .Where(output => ReducerUtils.TryGetBech32AddressParts(output, out string outPayment, out string? outStake) &&
-                            outPayment == paymentKeyHash && outStake == stakeKeyHash)
-            .Sum(output => (long)output.Amount().Lovelace());
-
-        // Calculate total outputs to other addresses
-        ulong totalOutputsToOthers = (ulong)txBody.Outputs()
-            .Where(output => ReducerUtils.TryGetBech32AddressParts(output, out string outPayment, out string? outStake) &&
-                            !(outPayment == paymentKeyHash && outStake == stakeKeyHash))
-            .Sum(output => (long)output.Amount().Lovelace());
-
-        // Classify based on net effect
-        if (totalInputs > 0)
-        {
-            // This is a spending transaction
-            if (totalOutputsToOthers > 0)
-            {
-                // Sent money to other addresses
-                activities.Add(new ActivityDetails(
-                    Type: TransactionType.Sent,
-                    Amount: totalOutputsToOthers,
-                    Subject: string.Empty,
-                    Address: ReducerUtils.ConstructBech32Address(paymentKeyHash, stakeKeyHash ?? string.Empty, networkType),
-                    PoolId: null,
-                    TypeId: null
-                ));
-            }
-
-            if (totalOutputsToSelf > 0)
-            {
-                // Change returned to self
-                activities.Add(new ActivityDetails(
-                    Type: TransactionType.Self,
-                    Amount: totalOutputsToSelf,
-                    Subject: string.Empty,
-                    Address: ReducerUtils.ConstructBech32Address(paymentKeyHash, stakeKeyHash ?? string.Empty, networkType),
-                    PoolId: null,
-                    TypeId: null
-                ));
-            }
-        }
-        else if (totalOutputsToSelf > 0)
-        {
-            // Pure receive transaction
-            activities.Add(new ActivityDetails(
-                Type: TransactionType.Received,
-                Amount: totalOutputsToSelf,
-                Subject: string.Empty,
-                Address: ReducerUtils.ConstructBech32Address(paymentKeyHash, stakeKeyHash ?? string.Empty, networkType),
-                PoolId: null,
-                TypeId: null
-            ));
-        }
-
-        return activities.AsEnumerable();
-    }
-
     private static IQueryable<TransactionByAddress> BuildBaseQuery(
         Web3ServicesDbContext dbContext,
         string paymentKeyHash,
@@ -546,7 +460,7 @@ public class GetTransactionHistoryEndpoint(
             baseQuery = baseQuery.Where(tx => tx.StakeKeyHash == stakeKeyHash);
         }
 
-        return baseQuery.ApplyTransactionHistoryCursorPagination(cursor, direction);
+        return ApplyTransactionHistoryCursorPagination(baseQuery, cursor, direction);
     }
 
     private static Pagination BuildPagination(List<TransactionByAddress> transactions, string? cursor, PaginationDirection direction, bool actualHasMore)
@@ -576,7 +490,6 @@ public class GetTransactionHistoryEndpoint(
 
         if (transactions.Count > 0)
         {
-            // Include both hash and slot for stable pagination - encode as "slot:hash"
             Cursor nextCursor = new($"{transactions.Last().Slot}:{transactions.Last().Hash}");
             Cursor previousCursor = new($"{transactions.First().Slot}:{transactions.First().Hash}");
             pagination.NextCursor = pagination.HasNext ? nextCursor.EncodeCursor() : null;
@@ -585,12 +498,9 @@ public class GetTransactionHistoryEndpoint(
 
         return pagination;
     }
-}
 
-static class TransactionHistoryQueryExtensions
-{
     public static IQueryable<TransactionByAddress> ApplyTransactionHistoryCursorPagination(
-        this IQueryable<TransactionByAddress> query,
+        IQueryable<TransactionByAddress> query,
         string? cursor,
         PaginationDirection direction)
     {
@@ -632,3 +542,18 @@ static class TransactionHistoryQueryExtensions
         }
     }
 }
+
+class GetTransactionHistoryBinder : IRequestBinder<GetTransactionHistoryRequest>
+{
+    public ValueTask<GetTransactionHistoryRequest> BindAsync(BinderContext ctx, CancellationToken ct)
+    {
+        return ValueTask.FromResult(new GetTransactionHistoryRequest
+        {
+            Address = ctx.HttpContext.Request.RouteValues["address"]?.ToString()!,
+            Cursor = ctx.HttpContext.Request.Query["cursor"].FirstOrDefault(),
+            Limit = int.TryParse(ctx.HttpContext.Request.Query["limit"].FirstOrDefault(), out int limit) ? limit : 50,
+            Direction = Enum.TryParse<PaginationDirection>(ctx.HttpContext.Request.Query["direction"].FirstOrDefault(), out var dir) ? dir : PaginationDirection.Next
+        });
+    }
+}
+

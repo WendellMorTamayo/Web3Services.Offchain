@@ -1,17 +1,12 @@
 using FastEndpoints;
 using Microsoft.EntityFrameworkCore;
 using Web3Services.Data.Models;
+using Web3Services.Data.Models.Api.Request;
+using Web3Services.Data.Models.Api.Response;
 using Web3Services.Data.Models.Entity;
 using Web3Services.Data.Utils;
 
-namespace Web3Services.API.Endpoints.Addresses;
-
-public record TrackAddressesRequest(IEnumerable<string> Addresses);
-
-public record TrackAddressesResponse(
-    int Added,
-    string Message
-);
+namespace Web3Services.API.Endpoints;
 
 public class TrackAddressesEndpoint(
     IDbContextFactory<Web3ServicesDbContext> dbContextFactory

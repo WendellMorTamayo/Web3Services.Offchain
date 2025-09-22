@@ -7,22 +7,8 @@ using Web3Services.Data.Models.Api.Response;
 using Web3Services.Data.Models.Entity;
 using Web3Services.Data.Utils;
 
-namespace Web3Services.API.Endpoints.Addresses;
+namespace Web3Services.API.Endpoints;
 
-public record TrackedAddressResponse(string Address, DateTime CreatedAt);
-
-public class GetTrackedAddressesBinder : IRequestBinder<GetTrackedAddressesRequest>
-{
-    public ValueTask<GetTrackedAddressesRequest> BindAsync(BinderContext ctx, CancellationToken ct)
-    {
-        return ValueTask.FromResult(new GetTrackedAddressesRequest
-        {
-            Cursor = ctx.HttpContext.Request.Query["cursor"].FirstOrDefault(),
-            Limit = int.TryParse(ctx.HttpContext.Request.Query["limit"].FirstOrDefault(), out int limit) ? limit : 50,
-            Direction = Enum.TryParse(ctx.HttpContext.Request.Query["direction"].FirstOrDefault(), out PaginationDirection dir) ? dir : PaginationDirection.Next
-        });
-    }
-}
 
 public class GetTrackedAddressesEndpoint(
     IDbContextFactory<Web3ServicesDbContext> dbContextFactory,
@@ -35,7 +21,7 @@ public class GetTrackedAddressesEndpoint(
     {
         Get("/addresses/tracked");
         AllowAnonymous();
-        
+
         RequestBinder(new GetTrackedAddressesBinder());
 
         Summary(s =>
@@ -104,7 +90,7 @@ public class GetTrackedAddressesEndpoint(
     private static IQueryable<TrackedAddress> BuildBaseQuery(Web3ServicesDbContext dbContext, string? cursor, PaginationDirection direction)
     {
         IQueryable<TrackedAddress> baseQuery = dbContext.TrackedAddresses.AsNoTracking();
-        return baseQuery.ApplyTrackedAddressCursorPagination(cursor, direction);
+        return ApplyTrackedAddressCursorPagination(baseQuery, cursor, direction);
     }
 
     private static Pagination BuildPagination(List<TrackedAddress> addresses, string? cursor, PaginationDirection direction, bool actualHasMore)
@@ -143,12 +129,9 @@ public class GetTrackedAddressesEndpoint(
 
         return pagination;
     }
-}
 
-static class TrackedAddressQueryExtensions
-{
     public static IQueryable<TrackedAddress> ApplyTrackedAddressCursorPagination(
-        this IQueryable<TrackedAddress> query,
+        IQueryable<TrackedAddress> query,
         string? cursor,
         PaginationDirection direction)
     {
@@ -192,5 +175,18 @@ static class TrackedAddressQueryExtensions
                 .OrderBy(ta => ta.PaymentKeyHash)
                 .ThenBy(ta => ta.StakeKeyHash);
         }
+    }
+}
+
+class GetTrackedAddressesBinder : IRequestBinder<GetTrackedAddressesRequest>
+{
+    public ValueTask<GetTrackedAddressesRequest> BindAsync(BinderContext ctx, CancellationToken ct)
+    {
+        return ValueTask.FromResult(new GetTrackedAddressesRequest
+        {
+            Cursor = ctx.HttpContext.Request.Query["cursor"].FirstOrDefault(),
+            Limit = int.TryParse(ctx.HttpContext.Request.Query["limit"].FirstOrDefault(), out int limit) ? limit : 50,
+            Direction = Enum.TryParse(ctx.HttpContext.Request.Query["direction"].FirstOrDefault(), out PaginationDirection dir) ? dir : PaginationDirection.Next
+        });
     }
 }

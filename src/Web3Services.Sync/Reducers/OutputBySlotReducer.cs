@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using Argus.Sync.Reducers;
 using Argus.Sync.Utils;
 using Chrysalis.Cbor.Extensions.Cardano.Core;
@@ -7,7 +8,6 @@ using Chrysalis.Cbor.Extensions.Cardano.Core.Transaction;
 using Chrysalis.Cbor.Serialization;
 using Chrysalis.Cbor.Types.Cardano.Core.Transaction;
 using Microsoft.EntityFrameworkCore;
-using System.Linq.Expressions;
 using Web3Services.Data.Models;
 using Web3Services.Data.Models.Entity;
 using Web3Services.Data.Utils;
@@ -71,16 +71,18 @@ public class OutputBySlotReducer(
 
         ProcessOutputs(outputsByTx, currentSlot, dbContext, trackedAddressesInBlock);
 
-        IEnumerable<string> inputTxHashes = transactions
-            .SelectMany(tx => tx.Inputs())
-            .Select(input => Convert.ToHexStringLower(input.TransactionId))
-            .Distinct();
+        IEnumerable<string> inputs = transactions.SelectMany(tx =>
+            tx.Inputs().Select(input => $"{Convert.ToHexStringLower(input.TransactionId)}#{input.Index}"));
 
         IEnumerable<OutputBySlot> resolvedInputs = await dbContext.OutputsBySlot
-            .Where(obs => inputTxHashes.Contains(obs.SpentTxHash))
+            .AsNoTracking()
+            .Where(e => inputs.Contains(e.OutRef))
+            .Where(obs => string.IsNullOrEmpty(obs.SpentTxHash))
             .ToListAsync();
 
-        ProcessInputs(resolvedInputs, transactions, currentSlot, dbContext, trackedAddressesInBlock);
+        resolvedInputs = resolvedInputs.Union(dbContext.OutputsBySlot.Local.Where(e => inputs.Contains(e.OutRef)));
+        ProcessInputs(resolvedInputs, transactions, currentSlot, dbContext);
+
         await dbContext.SaveChangesAsync();
     }
 
@@ -129,8 +131,7 @@ public class OutputBySlotReducer(
         IEnumerable<OutputBySlot> resolvedInputs,
         IEnumerable<TransactionBody> transactions,
         ulong currentSlot,
-        Web3ServicesDbContext dbContext,
-        IEnumerable<TrackedAddress> trackedAddresses
+        Web3ServicesDbContext dbContext
     )
     {
         IEnumerable<(string spentTxHash, OutputBySlot resolvedInput)> resolvedInputsByTx = transactions
@@ -138,7 +139,6 @@ public class OutputBySlotReducer(
             {
                 IEnumerable<string> txInputs = tx.Inputs().Select(input => $"{Convert.ToHexStringLower(input.TransactionId)}#{input.Index}");
                 IEnumerable<OutputBySlot> resolvedInputsByTx = resolvedInputs.Where(ri => txInputs.Contains(ri.OutRef));
-
                 return resolvedInputsByTx.Select(ribtx => (tx.Hash(), ribtx));
             });
 
@@ -147,8 +147,11 @@ public class OutputBySlotReducer(
             OutputBySlot? existingOutput = dbContext.OutputsBySlot.Local
                 .FirstOrDefault(e => e.OutRef == resolvedInputByTx.resolvedInput.OutRef);
 
-            OutputBySlot updatedOutput =
-                resolvedInputByTx.resolvedInput with { SpentTxHash = resolvedInputByTx.spentTxHash, SpentSlot = currentSlot };
+            OutputBySlot updatedOutput = resolvedInputByTx.resolvedInput with
+            {
+                SpentTxHash = resolvedInputByTx.spentTxHash,
+                SpentSlot = currentSlot
+            };
 
             if (existingOutput != null)
             {
