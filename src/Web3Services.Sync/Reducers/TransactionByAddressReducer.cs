@@ -1,5 +1,4 @@
 using System.Linq.Expressions;
-using System.Runtime.CompilerServices;
 using Argus.Sync.Reducers;
 using Argus.Sync.Utils;
 using Chrysalis.Cbor.Extensions.Cardano.Core;
@@ -36,39 +35,72 @@ public class TransactionByAddressReducer(
         IEnumerable<TransactionBody> transactions = block.TransactionBodies();
         if (!transactions.Any()) return;
 
-        IEnumerable<(string PaymentHash, string StakeHash)> blockAddresses =
-            ReducerUtils.ExtractAddressHashesFromBlock(transactions);
+        IEnumerable<TrackedAddress> trackedAddresses = await GetTrackedAddressesInBlock(dbContext, transactions);
+        if (!trackedAddresses.Any()) return;
+
+        ulong slot = block.Header().HeaderBody().Slot();
+        Dictionary<string, List<OutputBySlot>> resolvedInputsLookup = await BuildResolvedInputsLookup(dbContext, transactions, trackedAddresses, slot);
+
+        ProcessTransactions(slot, transactions, resolvedInputsLookup, trackedAddresses, dbContext);
+        await dbContext.SaveChangesAsync();
+    }
+
+    private static async Task<IEnumerable<TrackedAddress>> GetTrackedAddressesInBlock(
+        Web3ServicesDbContext dbContext,
+        IEnumerable<TransactionBody> transactions)
+    {
+        IEnumerable<(string PaymentHash, string StakeHash)> blockAddresses = ReducerUtils.ExtractAddressHashesFromBlock(transactions);
+
         Expression<Func<TrackedAddress, bool>> predicate = PredicateBuilder.False<TrackedAddress>();
         blockAddresses.ToList().ForEach(address =>
         {
             predicate = predicate.Or(ta => ta.PaymentKeyHash == address.PaymentHash && ta.StakeKeyHash == address.StakeHash);
         });
 
-        IEnumerable<TrackedAddress> trackedAddressesInBlock = await dbContext.TrackedAddresses
-            .Where(predicate)
-            .ToListAsync();
+        return await dbContext.TrackedAddresses.Where(predicate).ToListAsync();
+    }
 
-        if (!trackedAddressesInBlock.Any()) return;
-
-        ulong slot = block.Header().HeaderBody().Slot();
-
-        IEnumerable<string> inputTxHashes = transactions
+    private static async Task<Dictionary<string, List<OutputBySlot>>> BuildResolvedInputsLookup(
+        Web3ServicesDbContext dbContext,
+        IEnumerable<TransactionBody> transactions,
+        IEnumerable<TrackedAddress> trackedAddresses,
+        ulong slot)
+    {
+        IEnumerable<string> inputTxHashes = [.. transactions
             .SelectMany(tx => tx.Inputs())
             .Select(input => Convert.ToHexStringLower(input.TransactionId))
-            .Distinct();
+            .Distinct()];
 
         IEnumerable<OutputBySlot> resolvedInputs = await dbContext.OutputsBySlot
             .Where(obs => inputTxHashes.Contains(obs.SpentTxHash))
             .ToListAsync();
 
-        IEnumerable<OutputBySlot> sameBlockResolvedInputs = ResolveSameBlockInputs(
-            transactions, inputTxHashes, trackedAddressesInBlock, slot);
+        IEnumerable<OutputBySlot> updatedResolvedInputs = UpdateResolvedInputsWithSpendingTx(resolvedInputs, transactions, slot);
+        IEnumerable<OutputBySlot> sameBlockResolvedInputs = ResolveSameBlockInputs(transactions, inputTxHashes, trackedAddresses, slot);
 
-        HashSet<OutputBySlot> allResolvedInputs = [.. resolvedInputs, .. sameBlockResolvedInputs];
+        return updatedResolvedInputs.Concat(sameBlockResolvedInputs)
+            .Where(input => !string.IsNullOrEmpty(input.SpentTxHash))
+            .GroupBy(input => input.SpentTxHash)
+            .ToDictionary(g => g.Key, g => g.ToList());
+    }
 
-        ProcessTransactions(slot, transactions, allResolvedInputs, trackedAddressesInBlock, dbContext);
+    private static IEnumerable<OutputBySlot> UpdateResolvedInputsWithSpendingTx(
+        IEnumerable<OutputBySlot> resolvedInputs,
+        IEnumerable<TransactionBody> transactions,
+        ulong slot)
+    {
+        Dictionary<string, string> transactionInputMap = transactions
+            .SelectMany(tx => tx.Inputs().Select(input => new
+            {
+                InputRef = $"{Convert.ToHexStringLower(input.TransactionId)}#{input.Index}",
+                SpendingTxHash = tx.Hash()
+            }))
+            .ToDictionary(x => x.InputRef, x => x.SpendingTxHash);
 
-        await dbContext.SaveChangesAsync();
+        return resolvedInputs.Select(input =>
+            transactionInputMap.TryGetValue(input.OutRef, out string? spendingTxHash)
+                ? input with { SpentTxHash = spendingTxHash, SpentSlot = slot }
+                : input);
     }
 
     private static List<OutputBySlot> ResolveSameBlockInputs(
@@ -130,7 +162,7 @@ public class TransactionByAddressReducer(
     private static void ProcessTransactions(
         ulong slot,
         IEnumerable<TransactionBody> transactions,
-        IEnumerable<OutputBySlot> resolvedInputs,
+        Dictionary<string, List<OutputBySlot>> resolvedInputsLookup,
         IEnumerable<TrackedAddress> trackedAddresses,
         Web3ServicesDbContext dbContext
     )
@@ -139,18 +171,21 @@ public class TransactionByAddressReducer(
 
         transactions.ToList().ForEach(tx =>
         {
+            string txHash = tx.Hash();
+
             IEnumerable<(string PaymentKeyHash, string StakeKeyHash)> trackedOutputs =
                 ExtractTrackedAddressesFromOutputs(tx.Outputs(), trackedAddresses);
 
             IEnumerable<(string PaymentKeyHash, string StakeKeyHash)> trackedInputs =
-                ExtractTrackedAddressesFromInputs(resolvedInputs, trackedAddresses);
+                resolvedInputsLookup.TryGetValue(txHash, out List<OutputBySlot>? txInputs)
+                    ? ExtractTrackedAddressesFromInputs(txInputs, trackedAddresses)
+                    : [];
 
             if (!trackedOutputs.Any() && !trackedInputs.Any()) return;
 
             IEnumerable<string> subjects = [.. tx.Outputs().SelectMany(ReducerUtils.ExtractSubjectsFromOutput)];
-            string txHash = tx.Hash();
 
-            HashSet<(string PaymentKeyHash, string StakeKeyHash)> uniqueAddresses = [..trackedOutputs, ..trackedInputs];
+            HashSet<(string PaymentKeyHash, string StakeKeyHash)> uniqueAddresses = [.. trackedOutputs, .. trackedInputs];
 
             uniqueAddresses.ToList().ForEach(address =>
             {

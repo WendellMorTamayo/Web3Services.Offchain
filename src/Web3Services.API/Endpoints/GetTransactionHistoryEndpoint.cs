@@ -83,14 +83,10 @@ public class GetTransactionHistoryEndpoint(
 
         bool actualHasMore = transactions.Count > req.Limit;
         if (actualHasMore)
-        {
             transactions.RemoveAt(req.Limit);
-        }
 
         if (req.Direction == PaginationDirection.Previous)
-        {
             transactions.Reverse();
-        }
 
         IEnumerable<TransactionBody> transactionBodies = [.. transactions.Select(tx => TransactionBody.Read(tx.Raw))];
 
@@ -114,8 +110,7 @@ public class GetTransactionHistoryEndpoint(
                 Slot: tx.Slot,
                 Timestamp: ReducerUtils.SlotToTimestamp((long)tx.Slot, _networkType),
                 Raw: Convert.ToHexStringLower(tx.Raw)
-            ))
-            .Where(item => item.Activities.Any());
+            ));
 
         Pagination pagination = BuildPagination(transactions, req.Cursor, req.Direction, actualHasMore);
         PaginatedResponse<TransactionHistoryItem> response = new(historyItems, pagination);
@@ -123,7 +118,7 @@ public class GetTransactionHistoryEndpoint(
         await Send.OkAsync(response, ct);
     }
 
-    private IEnumerable<ActivityDetails> ClassifyTransactionActivities(
+    private static IEnumerable<ActivityDetails> ClassifyTransactionActivities(
         TransactionByAddress tx,
         string paymentKeyHash,
         string? stakeKeyHash,
@@ -149,6 +144,106 @@ public class GetTransactionHistoryEndpoint(
         {
             return [new ActivityDetails(TransactionType.Other, 0, null, null, null, null)];
         }
+    }
+
+    private static IEnumerable<TransactionActivityGroup> AnalyzeTransferActivities(
+        TransactionBody txBody,
+        string paymentKeyHash,
+        string? stakeKeyHash,
+        TransactionByAddress tx,
+        Dictionary<string, List<OutputBySlot>> inputUtxoLookup)
+    {
+        List<TransactionActivityGroup> activities = [];
+
+        try
+        {
+            IEnumerable<ActivityDetails> receivedDetails = ExtractReceivedTransfers(txBody, paymentKeyHash, stakeKeyHash);
+            IEnumerable<ActivityDetails> sentDetails = ExtractSentTransfers(tx, paymentKeyHash, stakeKeyHash, inputUtxoLookup);
+            IEnumerable<ActivityDetails> selfDetails = ExtractSelfTransfers(txBody, paymentKeyHash, stakeKeyHash, tx, inputUtxoLookup);
+
+            if (receivedDetails.Any()) activities.Add(new TransactionActivityGroup(receivedDetails));
+            if (sentDetails.Any()) activities.Add(new TransactionActivityGroup(sentDetails));
+            if (selfDetails.Any()) activities.Add(new TransactionActivityGroup(selfDetails));
+        }
+        catch
+        {
+            // Fallback - return empty
+        }
+
+        return activities.AsEnumerable();
+    }
+
+    private static List<ActivityDetails> ExtractReceivedTransfers(
+        TransactionBody txBody,
+        string paymentKeyHash,
+        string? stakeKeyHash)
+    {
+        List<ActivityDetails> allReceivedDetails = [];
+
+        List<TransactionOutput> addressOutputs = [.. txBody.Outputs()
+            .Where(output => ReducerUtils.TryGetBech32AddressParts(output, out string paymentHash, out string? stakeHash) &&
+                            paymentHash == paymentKeyHash && stakeHash == stakeKeyHash)];
+
+        addressOutputs.ForEach(output =>
+        {
+            allReceivedDetails.AddRange(ExtractActivityDetailsFromOutput(output, TransactionType.Received));
+        });
+
+        return allReceivedDetails;
+    }
+
+    private static List<ActivityDetails> ExtractSentTransfers(
+        TransactionByAddress tx,
+        string paymentKeyHash,
+        string? stakeKeyHash,
+        Dictionary<string, List<OutputBySlot>> inputUtxoLookup)
+    {
+        if (!inputUtxoLookup.TryGetValue(tx.Hash, out List<OutputBySlot>? inputUtxos))
+            return [];
+
+        List<ActivityDetails> allSentDetails = [];
+
+        inputUtxos
+            .Where(utxo => utxo.PaymentKeyHash == paymentKeyHash && utxo.StakeKeyHash == stakeKeyHash)
+            .ToList()
+            .ForEach(utxo =>
+            {
+                TransactionOutput output = TransactionOutput.Read(utxo.Raw);
+                allSentDetails.AddRange(ExtractActivityDetailsFromOutput(output, TransactionType.Sent));
+            });
+
+        return allSentDetails;
+    }
+
+    private static List<ActivityDetails> ExtractSelfTransfers(
+        TransactionBody txBody,
+        string paymentKeyHash,
+        string? stakeKeyHash,
+        TransactionByAddress tx,
+        Dictionary<string, List<OutputBySlot>> inputUtxoLookup)
+    {
+        List<ActivityDetails> selfDetails = [];
+
+        List<TransactionOutput> selfOutputs = [.. txBody.Outputs()
+            .Where(output =>
+            {
+                if (!ReducerUtils.TryGetBech32AddressParts(output, out string outputPaymentHash, out string? outputStakeHash)) return false;
+                return outputPaymentHash == paymentKeyHash && outputStakeHash == stakeKeyHash;
+            })];
+
+        // Only consider it a self-transfer if we have inputs from the same address
+        bool hasInputsFromSameAddress = inputUtxoLookup.ContainsKey(tx.Hash) &&
+            inputUtxoLookup[tx.Hash].Any(utxo => utxo.PaymentKeyHash == paymentKeyHash && utxo.StakeKeyHash == stakeKeyHash);
+
+        if (hasInputsFromSameAddress)
+        {
+            selfOutputs.ForEach(output =>
+            {
+                selfDetails.AddRange(ExtractActivityDetailsFromOutput(output, TransactionType.Self));
+            });
+        }
+
+        return selfDetails;
     }
 
     private static IEnumerable<TransactionActivityGroup> AnalyzeStakingActivities(
@@ -186,8 +281,7 @@ public class GetTransactionHistoryEndpoint(
         TransactionBody txBody,
         string? stakeKeyHash)
     {
-        if (string.IsNullOrEmpty(stakeKeyHash) || txBody.Withdrawals()?.Count == 0)
-            return [];
+        if (string.IsNullOrEmpty(stakeKeyHash) || txBody.Withdrawals()?.Count == 0) return [];
 
         List<ActivityDetails> withdrawalDetails = [];
         txBody.Withdrawals()?.ToList().ForEach(withdrawal =>
@@ -269,181 +363,6 @@ public class GetTransactionHistoryEndpoint(
         return [];
     }
 
-    private static IEnumerable<TransactionActivityGroup> AnalyzeTransferActivities(
-        TransactionBody txBody,
-        string paymentKeyHash,
-        string? stakeKeyHash,
-        TransactionByAddress tx,
-        Dictionary<string, List<OutputBySlot>> inputUtxoLookup)
-    {
-        List<TransactionActivityGroup> activities = [];
-
-        try
-        {
-            IEnumerable<ActivityDetails> receivedDetails = ExtractReceivedTransfers(txBody, paymentKeyHash, stakeKeyHash);
-            IEnumerable<ActivityDetails> sentDetails = ExtractSentTransfers(tx, paymentKeyHash, stakeKeyHash, inputUtxoLookup);
-            IEnumerable<ActivityDetails> selfDetails = ExtractSelfTransfers(txBody, paymentKeyHash, stakeKeyHash, tx, inputUtxoLookup);
-
-            if (receivedDetails.Any())
-            {
-                activities.Add(new TransactionActivityGroup(receivedDetails));
-            }
-
-            if (sentDetails.Any())
-            {
-                activities.Add(new TransactionActivityGroup(sentDetails));
-            }
-
-            if (selfDetails.Any())
-            {
-                activities.Add(new TransactionActivityGroup(selfDetails));
-            }
-        }
-        catch
-        {
-            // Fallback - return empty
-        }
-
-        return activities.AsEnumerable();
-    }
-
-    private static List<ActivityDetails> ExtractReceivedTransfers(
-        TransactionBody txBody,
-        string paymentKeyHash,
-        string? stakeKeyHash)
-    {
-        List<ActivityDetails> allReceivedDetails = [];
-
-        List<TransactionOutput> addressOutputs = [.. txBody.Outputs()
-            .Where(output => ReducerUtils.TryGetBech32AddressParts(output, out string paymentHash, out string? stakeHash) &&
-                            paymentHash == paymentKeyHash && stakeHash == stakeKeyHash)];
-
-        addressOutputs.ForEach(output =>
-        {
-            string address = new Address(output.Address()).ToBech32();
-
-            // Add ADA amount
-            if (output.Amount().Lovelace() > 0)
-            {
-                allReceivedDetails.Add(new ActivityDetails(
-                    Type: TransactionType.Received,
-                    Amount: output.Amount().Lovelace(),
-                    Subject: string.Empty,
-                    Address: address,
-                    PoolId: null,
-                    TypeId: null
-                ));
-            }
-
-            // Add multi-asset amounts
-            if (output.Amount().MultiAsset().Any())
-            {
-                allReceivedDetails.AddRange(
-                    output.Amount().MultiAsset().Keys
-                        .Select(keyBytes => Convert.ToHexString(keyBytes).ToLower())
-                        .Select(subject => new { subject, amount = output.Amount().QuantityOf(subject) })
-                        .Where(x => x.amount.HasValue && x.amount.Value > 0)
-                        .Select(x => new ActivityDetails(
-                            Type: TransactionType.Received,
-                            Amount: x.amount ?? 0,
-                            Subject: x.subject,
-                            Address: address,
-                            PoolId: null,
-                            TypeId: null
-                        ))
-                );
-            }
-        });
-
-        return allReceivedDetails;
-    }
-
-    private static List<ActivityDetails> ExtractSentTransfers(
-        TransactionByAddress tx,
-        string paymentKeyHash,
-        string? stakeKeyHash,
-        Dictionary<string, List<OutputBySlot>> inputUtxoLookup)
-    {
-        if (!inputUtxoLookup.TryGetValue(tx.Hash, out List<OutputBySlot>? inputUtxos))
-            return [];
-
-        return [.. inputUtxos
-            .Where(utxo => utxo.PaymentKeyHash == paymentKeyHash && utxo.StakeKeyHash == stakeKeyHash)
-            .Select(utxo => new { utxo, output = TransactionOutput.Read(utxo.Raw) })
-            .Where(x => x.output.Amount().Lovelace() > 0)
-            .Select(x => new ActivityDetails(
-                Type: TransactionType.Sent,
-                Amount: x.output.Amount().Lovelace(),
-                Subject: string.Empty,
-                Address: new Address(x.output.Address()).ToBech32(),
-                PoolId: null,
-                TypeId: null
-            ))];
-    }
-
-    private static List<ActivityDetails> ExtractSelfTransfers(
-        TransactionBody txBody,
-        string paymentKeyHash,
-        string? stakeKeyHash,
-        TransactionByAddress tx,
-        Dictionary<string, List<OutputBySlot>> inputUtxoLookup)
-    {
-        List<ActivityDetails> selfDetails = [];
-
-        List<TransactionOutput> selfOutputs = [.. txBody.Outputs()
-            .Where(output =>
-            {
-                if (!ReducerUtils.TryGetBech32AddressParts(output, out string outputPaymentHash, out string? outputStakeHash)) return false;
-                return outputPaymentHash == paymentKeyHash && outputStakeHash == stakeKeyHash;
-            })];
-
-        // Only consider it a self-transfer if we have inputs from the same address
-        bool hasInputsFromSameAddress = inputUtxoLookup.ContainsKey(tx.Hash) &&
-            inputUtxoLookup[tx.Hash].Any(utxo => utxo.PaymentKeyHash == paymentKeyHash && utxo.StakeKeyHash == stakeKeyHash);
-
-        if (hasInputsFromSameAddress)
-        {
-            selfOutputs.ForEach(output =>
-            {
-                string address = new Address(output.Address()).ToBech32();
-
-                // Add ADA amount for self-transfers
-                if (output.Amount().Lovelace() > 0)
-                {
-                    selfDetails.Add(new ActivityDetails(
-                        Type: TransactionType.Self,
-                        Amount: output.Amount().Lovelace(),
-                        Subject: string.Empty,
-                        Address: address,
-                        PoolId: null,
-                        TypeId: null
-                    ));
-                }
-
-                // Add multi-asset amounts for self-transfers
-                if (output.Amount().MultiAsset().Any())
-                {
-                    selfDetails.AddRange(
-                        output.Amount().MultiAsset().Keys
-                            .Select(keyBytes => Convert.ToHexString(keyBytes).ToLower())
-                            .Select(subject => new { subject, amount = output.Amount().QuantityOf(subject) })
-                            .Where(x => x.amount.HasValue && x.amount.Value > 0)
-                            .Select(x => new ActivityDetails(
-                                Type: TransactionType.Self,
-                                Amount: x.amount ?? 0,
-                                Subject: x.subject,
-                                Address: address,
-                                PoolId: null,
-                                TypeId: null
-                            ))
-                    );
-                }
-            });
-        }
-
-        return selfDetails;
-    }
-
     private static IQueryable<TransactionByAddress> BuildBaseQuery(
         Web3ServicesDbContext dbContext,
         string paymentKeyHash,
@@ -499,6 +418,48 @@ public class GetTransactionHistoryEndpoint(
         return pagination;
     }
 
+    private static List<ActivityDetails> ExtractActivityDetailsFromOutput(
+        TransactionOutput output,
+        TransactionType type)
+    {
+        List<ActivityDetails> details = [];
+        string address = new Address(output.Address()).ToBech32();
+
+        // Add ADA amount
+        if (output.Amount().Lovelace() > 0)
+        {
+            details.Add(new ActivityDetails(
+                Type: type,
+                Amount: output.Amount().Lovelace(),
+                Subject: string.Empty,
+                Address: address,
+                PoolId: null,
+                TypeId: null
+            ));
+        }
+
+        // Add multi-asset amounts
+        if (output.Amount().MultiAsset().Any())
+        {
+            details.AddRange(
+                output.Amount().MultiAsset().Keys
+                    .Select(keyBytes => Convert.ToHexString(keyBytes).ToLower())
+                    .Select(subject => new { subject, amount = output.Amount().QuantityOf(subject) })
+                    .Where(x => x.amount.HasValue && x.amount.Value > 0)
+                    .Select(x => new ActivityDetails(
+                        Type: type,
+                        Amount: x.amount ?? 0,
+                        Subject: x.subject,
+                        Address: address,
+                        PoolId: null,
+                        TypeId: null
+                    ))
+            );
+        }
+
+        return details;
+    }
+
     public static IQueryable<TransactionByAddress> ApplyTransactionHistoryCursorPagination(
         IQueryable<TransactionByAddress> query,
         string? cursor,
@@ -512,7 +473,6 @@ public class GetTransactionHistoryEndpoint(
                 return query.OrderByDescending(tx => tx.Slot).ThenByDescending(tx => tx.Hash);
             }
 
-            // Parse "slot:hash" format
             string[] parts = decodedCursor.Key.Split(':');
             if (parts.Length != 2 || !ulong.TryParse(parts[0], out ulong cursorSlot))
             {

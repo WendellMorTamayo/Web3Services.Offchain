@@ -1,0 +1,21 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+			"type": "dotnet",
+			"task": "build ./src/Web3Services.Sync/Web3Services.Sync.csproj",
+			"file": "./src/Web3Services.Sync/Web3Services.Sync.csproj",
+			"group": "build",
+			"problemMatcher": [],
+			"label": "build:sync",
+		},
+        {
+			"type": "dotnet",
+			"task": "build ./src/Web3Services.API/Web3Services.API.csproj",
+			"file": "./src/Web3Services.API/Web3Services.API.csproj",
+			"group": "build",
+			"problemMatcher": [],
+			"label": "build:api",
+		}
+    ]
+}

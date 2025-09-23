@@ -1,0 +1,36 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "2.0.0",
+    "configurations": [
+        {
+            "name": ".NET Core Launch (sync)",
+            "type": "coreclr",
+            "request": "launch",
+            "preLaunchTask": "build:sync",
+            "program": "${workspaceFolder}/src/Web3Services.Sync/bin/Debug/net9.0/Web3Services.Sync.dll",
+            "args": [],
+            "cwd": "${workspaceFolder}/src/Web3Services.Sync",
+            "stopAtEntry": false,
+            "env": {
+                "ASPNETCORE_ENVIRONMENT": "Development"
+            },
+            "console": "integratedTerminal"
+        },
+        {
+            "name": ".NET Core Launch (api)",
+            "type": "coreclr",
+            "request": "launch",
+            "preLaunchTask": "build:api",
+            "program": "${workspaceFolder}/src/Web3Services.API/bin/Debug/net9.0/Web3Services.API.dll",
+            "args": [],
+            "cwd": "${workspaceFolder}/src/Web3Services.API",
+            "stopAtEntry": false,
+            "env": {
+                "ASPNETCORE_ENVIRONMENT": "Development"
+            },
+            "console": "integratedTerminal"
+        }
+    ]
+}
